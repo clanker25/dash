@@ -1,0 +1,167 @@
+{
+    "chapter1": {
+        "objs": {},
+        "strs": {
+            "toc": ["components", "props", "children", 0],
+            "body": ["components", "props", "children", 1],
+            "chapter1-header": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                0
+            ],
+            "chapter1-controls": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                1
+            ],
+            "chapter1-label": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                2
+            ],
+            "chapter1-graph": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                3
+            ]
+        }
+    },
+    "chapter2": {
+        "objs": {},
+        "strs": {
+            "toc": ["components", "props", "children", 0],
+            "body": ["components", "props", "children", 1],
+            "chapter2-header": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                0
+            ],
+            "chapter2-controls": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                1
+            ],
+            "chapter2-label": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                2
+            ],
+            "chapter2-graph": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                "props",
+                "children",
+                3
+            ]
+        }
+    },
+    "chapter3": {
+        "objs": {},
+        "strs": {
+            "toc": ["components", "props", "children", 0],
+            "body": ["components", "props", "children", 1],
+            "chapter3-header": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                0,
+                "props",
+                "children",
+                "props",
+                "children",
+                0
+            ],
+            "chapter3-label": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                0,
+                "props",
+                "children",
+                "props",
+                "children",
+                1
+            ],
+            "chapter3-graph": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                0,
+                "props",
+                "children",
+                "props",
+                "children",
+                2
+            ],
+            "chapter3-controls": [
+                "components",
+                "props",
+                "children",
+                1,
+                "props",
+                "children",
+                0,
+                "props",
+                "children",
+                "props",
+                "children",
+                3
+            ]
+        }
+    }
+}
