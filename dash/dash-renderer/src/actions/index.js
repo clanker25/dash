@@ -1,0 +1,211 @@
+import {once, path} from 'ramda';
+import {createAction} from 'redux-actions';
+import {addRequestedCallbacks} from './callbacks';
+import {getAppState} from '../reducers/constants';
+import {getAction} from './constants';
+import {parseCookie} from 'cookie';
+import {validateCallbacksToLayout} from './dependencies';
+import {
+    includeObservers,
+    getLayoutCallbacks,
+    makeResolvedCallback,
+    resolveDeps
+} from './dependencies_ts';
+import {computePaths, getPath} from './paths';
+import {recordUiEdit} from '../persistence';
+
+export const onError = createAction(getAction('ON_ERROR'));
+export const setAppLifecycle = createAction(getAction('SET_APP_LIFECYCLE'));
+export const setConfig = createAction(getAction('SET_CONFIG'));
+export const addHttpHeaders = createAction(getAction('ADD_HTTP_HEADERS'));
+export const setGraphs = createAction(getAction('SET_GRAPHS'));
+export const setHooks = createAction(getAction('SET_HOOKS'));
+export const setLayout = createAction(getAction('SET_LAYOUT'));
+export const setPaths = createAction(getAction('SET_PATHS'));
+export const setRequestQueue = createAction(getAction('SET_REQUEST_QUEUE'));
+export const insertComponent = createAction(getAction('INSERT_COMPONENT'));
+export const removeComponent = createAction(getAction('REMOVE_COMPONENT'));
+
+export const onPropChange = createAction(getAction('ON_PROP_CHANGE'));
+export const resetComponentState = createAction(
+    getAction('RESET_COMPONENT_STATE')
+);
+
+export function updateProps(payload) {
+    return (dispatch, getState) => {
+        const component = path(payload.itempath, getState().layout);
+        // The component may no longer exist at this path - eg. an
+        // `ExternalWrapper` (components as props) whose host subtree was
+        // replaced by a callback. Updating props of a component that isn't
+        // in the layout is a no-op and would crash `recordUiEdit`.
+        if (!component) {
+            return;
+        }
+        recordUiEdit(component, payload.props, dispatch);
+        dispatch(onPropChange(payload));
+    };
+}
+
+export const addComponentToLayout = payload => (dispatch, getState) => {
+    const {paths} = getState();
+    dispatch(insertComponent(payload));
+    dispatch(
+        setPaths(computePaths(payload.component, payload.componentPath, paths))
+    );
+};
+
+export const dispatchError = dispatch => (message, lines) =>
+    dispatch(
+        onError({
+            type: 'backEnd',
+            error: {message, html: lines.join('\n')}
+        })
+    );
+
+export function hydrateInitialOutputs() {
+    return function (dispatch, getState) {
+        validateCallbacksToLayout(getState(), dispatchError(dispatch));
+        triggerDefaultState(dispatch, getState);
+        dispatch(setAppLifecycle(getAppState('HYDRATED')));
+    };
+}
+
+/* eslint-disable-next-line no-console */
+const logWarningOnce = once(console.warn);
+
+export function getCSRFHeader(config) {
+    try {
+        const tokenName = (config && config.csrf_token_name) || '_csrf_token';
+        const headerName = (config && config.csrf_header_name) || 'X-CSRFToken';
+        const cookies = parseCookie(document.cookie);
+        const token = cookies[tokenName];
+        if (!token) {
+            return {};
+        }
+        return {[headerName]: token};
+    } catch (e) {
+        logWarningOnce(e);
+        return {};
+    }
+}
+
+function triggerDefaultState(dispatch, getState) {
+    const {graphs, paths, layout} = getState();
+
+    // overallOrder will assert circular dependencies for multi output.
+    try {
+        graphs.MultiGraph.overallOrder();
+    } catch (err) {
+        dispatch(
+            onError({
+                type: 'backEnd',
+                error: {
+                    message: 'Circular Dependencies',
+                    html: err.toString()
+                }
+            })
+        );
+    }
+
+    const layoutCallbacks = getLayoutCallbacks(
+        graphs,
+        paths,
+        layout.components,
+        {
+            outputsOnly: true
+        }
+    );
+
+    // Also include no-output and no-input callbacks that should fire on initial load
+    const specialCallbacks = (graphs.callbacks || []).reduce((acc, cb) => {
+        if (cb.prevent_initial_call) {
+            return acc;
+        }
+
+        const isNoOutput = cb.noOutput;
+        const isNoInput = !cb.noOutput && cb.inputs.length === 0;
+
+        if (!isNoOutput && !isNoInput) {
+            return acc;
+        }
+
+        const resolved = makeResolvedCallback(cb, resolveDeps(), '');
+        resolved.initialCall = true;
+
+        if (isNoOutput) {
+            // No-output: include if no inputs or any input is in layout
+            if (cb.inputs.length === 0) {
+                acc.push(resolved);
+            } else {
+                const inputs = resolved.getInputs(paths);
+                if (
+                    inputs.some(inp =>
+                        Array.isArray(inp) ? inp.length > 0 : inp
+                    )
+                ) {
+                    acc.push(resolved);
+                }
+            }
+        } else {
+            // No-input: include if any output is in layout
+            const outputs = resolved.getOutputs(paths);
+            if (
+                outputs.some(out => (Array.isArray(out) ? out.length > 0 : out))
+            ) {
+                acc.push(resolved);
+            }
+        }
+
+        return acc;
+    }, []);
+
+    dispatch(addRequestedCallbacks([...layoutCallbacks, ...specialCallbacks]));
+}
+
+export const redo = moveHistory('REDO');
+export const undo = moveHistory('UNDO');
+export const revert = moveHistory('REVERT');
+
+function moveHistory(changeType) {
+    return function (dispatch, getState) {
+        const {history, paths} = getState();
+        dispatch(createAction(changeType)());
+        const {id, props} =
+            (changeType === 'REDO'
+                ? history.future[0]
+                : history.past[history.past.length - 1]) || {};
+        if (id) {
+            // Update props
+            dispatch(
+                createAction('UNDO_PROP_CHANGE')({
+                    itempath: getPath(paths, id),
+                    props
+                })
+            );
+
+            dispatch(notifyObservers({id, props}));
+        }
+    };
+}
+
+export function notifyObservers({id, props}) {
+    return async function (dispatch, getState) {
+        const {graphs, paths} = getState();
+        dispatch(
+            addRequestedCallbacks(includeObservers(id, props, graphs, paths))
+        );
+    };
+}
+
+export function handleAsyncError(err, message, dispatch) {
+    // Handle html error responses
+    if (err && typeof err.text === 'function') {
+        err.text().then(text => {
+            const error = {message, html: text};
+            dispatch(onError({type: 'backEnd', error}));
+        });
+    } else {
+        const error = err instanceof Error ? err : {message, html: err};
+        dispatch(onError({type: 'backEnd', error}));
+    }
+}
