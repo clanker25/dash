@@ -1,0 +1,27 @@
+{
+    "compilerOptions": {
+        "allowJs": true,
+        "allowSyntheticDefaultImports": true,
+        "emitDecoratorMetadata": true,
+        "experimentalDecorators": true,
+        "jsx": "react",
+        "lib": ["esnext", "dom"],
+        "module": "esnext",
+        "moduleResolution": "node",
+        "noImplicitAny": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "outDir": "./tsbuild",
+        "sourceMap": false,
+        "strict": false,
+        "strictBindCallApply": false,
+        "strictNullChecks": true,
+        "strictPropertyInitialization": true,
+        "target": "esnext",
+        "traceResolution": true
+    },
+    "include": [
+        "src/**/*",
+        "tests/**/*"
+    ]
+}
